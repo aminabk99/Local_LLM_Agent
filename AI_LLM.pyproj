@@ -4,7 +4,7 @@
     <SchemaVersion>2.0</SchemaVersion>
     <ProjectGuid>ab83013c-c218-4371-b2e3-98625c0f063e</ProjectGuid>
     <ProjectHome>.</ProjectHome>
-    <StartupFile>AI_LLM.py</StartupFile>
+    <StartupFile>main.py</StartupFile>
     <SearchPath>
     </SearchPath>
     <WorkingDirectory>.</WorkingDirectory>
@@ -21,11 +21,19 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="AI_LLM.py" />
+    <Compile Include="agent\core.py" />
+    <Compile Include="agent\llm_ollama.py" />
+    <Compile Include="agent\prompts.py" />
+    <Compile Include="agent\tools.py" />
+    <Compile Include="agent\__init__.py" />
+    <Compile Include="main.py" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="agent\" />
     <Folder Include="workspace\" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="requirements.txt" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in
