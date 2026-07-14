@@ -1,0 +1,30 @@
+{
+  "_comment": "Standard coding task suite for multi-model benchmarking. Each task tests a different capability relevant to the agent's JSON action loop.",
+  "tasks": [
+    {
+      "id": "hello_world",
+      "category": "Basic Generation",
+      "prompt": "Write a Python function called greet(name) that returns 'Hello, {name}!'. Include a docstring."
+    },
+    {
+      "id": "json_parse",
+      "category": "JSON Handling",
+      "prompt": "Write a Python function that takes a JSON string and returns the value of the 'action' key. Handle the case where the key doesn't exist by returning None. Handle invalid JSON by returning None."
+    },
+    {
+      "id": "file_read",
+      "category": "Tool Use Reasoning",
+      "prompt": "You are a coding agent. A user wants to know the number of lines in a file called data.txt. Describe which tool you would call first and what action JSON you would emit. Use this format: {\"action\": \"<tool>\", \"args\": {\"path\": \"<path>\"}}"
+    },
+    {
+      "id": "error_handling",
+      "category": "Robustness",
+      "prompt": "Write a Python function safe_divide(a, b) that divides a by b. It should handle ZeroDivisionError and TypeError gracefully, returning None in both cases."
+    },
+    {
+      "id": "privacy_reasoning",
+      "category": "Privacy Framing",
+      "prompt": "A developer asks: should I use a cloud LLM API or a local model for processing confidential customer documents? Give three specific technical reasons why a local model is preferable from a privacy and compliance standpoint."
+    }
+  ]
+}
