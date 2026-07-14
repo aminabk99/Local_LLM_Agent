@@ -1,0 +1,242 @@
+{
+  "timestamp": "2026-07-14T16:40:01.085189+00:00",
+  "models": [
+    "tinyllama",
+    "phi3:mini",
+    "qwen2.5-coder:7b"
+  ],
+  "tasks": [
+    "hello_world",
+    "json_parse",
+    "file_read",
+    "error_handling",
+    "privacy_reasoning"
+  ],
+  "runs": [
+    {
+      "model": "tinyllama",
+      "task_results": [
+        {
+          "task_id": "hello_world",
+          "category": "Basic Generation",
+          "answer": "```python\ndef greet(name):\n    return f\"Hello, {name}!\"\n```\n\nHere's the docstring for the function:\n\n```python\n@docstring_for(greet)\ndef greet(name):\n    \"\"\"\n    Returns 'Hello, {name}!'\n    \n    Args:\n        name (str): The name to greet.\n        \n    Returns:\n        str: A string with the greeting.\n    \"\"\"\n```\n\nYou can call the function like this:\n\n```python\n>>> greet(\"John\")\n'Hello, John!'\n``",
+          "json_parseable": null,
+          "task_success": true,
+          "tokens_generated": 140,
+          "tokens_per_sec": 13.05,
+          "ttft_s": 2.565,
+          "generation_s": 10.729,
+          "total_s": 21.964,
+          "wall_time_s": 25.14
+        },
+        {
+          "task_id": "json_parse",
+          "category": "JSON Handling",
+          "answer": "```python\ndef json_to_dict(json_str):\n    try:\n        # Convert JSON string to Python dictionary\n        return json.loads(json_str)\n    except ValueError as e:\n        print(\"Invalid JSON format:\", e)\n        return None\n\n# Example usage\njson_str = \"\"\"{\n  \"action\": \"run\",\n  \"args\": {\n    \"command\": \"echo hello world\"\n  }\n}\"\"\"\n\nresult = json_to_dict(json_str)\nif result is not None:\n    print(\"JSO",
+          "json_parseable": true,
+          "task_success": true,
+          "tokens_generated": 151,
+          "tokens_per_sec": 14.5,
+          "ttft_s": 1.398,
+          "generation_s": 10.417,
+          "total_s": 12.133,
+          "wall_time_s": 15.604
+        },
+        {
+          "task_id": "file_read",
+          "category": "Tool Use Reasoning",
+          "answer": "To describe the number of lines in a file called \"data.txt\" using a JSON action, I would use the following format:\n\n```json\n{\n    \"action\": \"cat\",\n    \"args\": {\n        \"path\": \"data.txt\"\n    }\n}\n```\n\nThis action will emit a single line of output containing the number of lines in the file specified by the path parameter.",
+          "json_parseable": true,
+          "task_success": true,
+          "tokens_generated": 90,
+          "tokens_per_sec": 15.59,
+          "ttft_s": 1.618,
+          "generation_s": 5.773,
+          "total_s": 7.644,
+          "wall_time_s": 11.244
+        },
+        {
+          "task_id": "error_handling",
+          "category": "Robustness",
+          "answer": "```python\ndef safe_divide(a, b):\n    try:\n        return a / b\n    except ZeroDivisionError:\n        return None\n```\n\nExplanation:\n\nThe `safe_divide` function first checks if the division by zero is possible. If it is, it raises a `ZeroDivisionError`. This ensures that the function will not crash when attempting to divide by 0.\n\nIf the division is possible, the function calls the base case of the ",
+          "json_parseable": null,
+          "task_success": true,
+          "tokens_generated": 210,
+          "tokens_per_sec": 13.17,
+          "ttft_s": 1.107,
+          "generation_s": 15.948,
+          "total_s": 17.362,
+          "wall_time_s": 20.827
+        },
+        {
+          "task_id": "privacy_reasoning",
+          "category": "Privacy Framing",
+          "answer": "As a developer, you may be asked to choose between using a cloud-based LLM (Language Modeling) API or a local model for processing confidential customer documents. Here are three specific technical reasons why a local model is preferable from a privacy and compliance standpoint:\n\n1. Privacy: A cloud-based LLM can be accessed by multiple users simultaneously, which means that sensitive information ",
+          "json_parseable": null,
+          "task_success": true,
+          "tokens_generated": 319,
+          "tokens_per_sec": 11.94,
+          "ttft_s": 1.598,
+          "generation_s": 26.722,
+          "total_s": 29.244,
+          "wall_time_s": 33.061
+        }
+      ],
+      "mean_tokens_per_sec": 13.65,
+      "mean_ttft_s": 1.657,
+      "mean_total_s": 17.669,
+      "json_parse_rate": 1.0,
+      "task_success_rate": 1.0
+    },
+    {
+      "model": "phi3:mini",
+      "task_results": [
+        {
+          "task_id": "hello_world",
+          "category": "Basic Generation",
+          "answer": "```python\n\ndef greet(name):\n\n    \"\"\"Returns a personalized greeting for the given name.\"\"\"\n\n    return f'Hello, {name}!'\n\n```",
+          "json_parseable": null,
+          "task_success": true,
+          "tokens_generated": 43,
+          "tokens_per_sec": 4.77,
+          "ttft_s": 7.716,
+          "generation_s": 9.017,
+          "total_s": 28.349,
+          "wall_time_s": 31.367
+        },
+        {
+          "task_id": "json_parse",
+          "category": "JSON Handling",
+          "answer": "```python\nimport json\n\ndef get_json_action(json_string):\n    try:\n        data = json.loads(json_string)\n        return data.get('action')\n    except (ValueError, KeyError, TypeError):\n        # Handle invalid JSON or missing 'action' key by returning None\n        return None\n```",
+          "json_parseable": false,
+          "task_success": true,
+          "tokens_generated": 77,
+          "tokens_per_sec": 5.44,
+          "ttft_s": 4.278,
+          "generation_s": 14.144,
+          "total_s": 18.631,
+          "wall_time_s": 22.862
+        },
+        {
+          "task_id": "file_read",
+          "category": "Tool Use Reasoning",
+          "answer": "{\"action\": \"cat\", \"args\": {\"path\": \"/path/to/data.txt\"}}\n\n# Python code to count the number of lines in data.txt and print it out would be:\n```python\nwith open('/path/to/data.txt', 'r') as file:\n    line_count = sum(1 for _ in file)\nprint(line_count)\n```",
+          "json_parseable": true,
+          "task_success": true,
+          "tokens_generated": 89,
+          "tokens_per_sec": 4.77,
+          "ttft_s": 5.789,
+          "generation_s": 18.661,
+          "total_s": 24.707,
+          "wall_time_s": 28.585
+        },
+        {
+          "task_id": "error_handling",
+          "category": "Robustness",
+          "answer": "```json\n\n{\n\n  \"function\": {\n\n    \"name\": \"safe_divide\",\n\n    \"parameters\": [\"a\", \"b\"],\n\n    \"returns\": null,\n\n    \"description\": \"Divides a by b with error handling for division by zero and type mismatches.\"\n\n  }\n\n}\n\n```\n\n\n```python\n\ndef safe_divide(a, b):\n\n    try:\n\n        return a / b\n\n    except ZeroDivisionError:\n\n        print(\"Cannot divide by zero.\")\n\n        return None\n\n    except TypeEr",
+          "json_parseable": null,
+          "task_success": true,
+          "tokens_generated": 162,
+          "tokens_per_sec": 5.44,
+          "ttft_s": 3.653,
+          "generation_s": 29.772,
+          "total_s": 33.692,
+          "wall_time_s": 37.348
+        },
+        {
+          "task_id": "privacy_reasoning",
+          "category": "Privacy Framing",
+          "answer": "```json\n\n{\n\n  \"reasons\": [\n\n    {\n      \"reason\": \"Data Residency\",\n      \"detail\": \"Local models ensure that sensitive data does not leave the jurisdiction, adhering to strict data residency regulations.\"\n    },\n\n    {\n\n      \"reason\": \"Control Over Data Processing\",\n\n      \"detail\": \"With a local model, you have full control over how and when customer documents are processed without relying on t",
+          "json_parseable": null,
+          "task_success": true,
+          "tokens_generated": 372,
+          "tokens_per_sec": 5.36,
+          "ttft_s": 4.588,
+          "generation_s": 69.461,
+          "total_s": 74.194,
+          "wall_time_s": 77.6
+        }
+      ],
+      "mean_tokens_per_sec": 5.16,
+      "mean_ttft_s": 5.205,
+      "mean_total_s": 35.915,
+      "json_parse_rate": 0.5,
+      "task_success_rate": 1.0
+    },
+    {
+      "model": "qwen2.5-coder:7b",
+      "task_results": [
+        {
+          "task_id": "hello_world",
+          "category": "Basic Generation",
+          "answer": "```python\ndef greet(name):\n    \"\"\"\n    Returns a greeting string with the provided name.\n\n    Parameters:\n    name (str): The name to greet.\n\n    Returns:\n    str: A greeting message.\n    \"\"\"\n    return f'Hello, {name}!'\n```",
+          "json_parseable": null,
+          "task_success": true,
+          "tokens_generated": 56,
+          "tokens_per_sec": 3.1,
+          "ttft_s": 8.269,
+          "generation_s": 18.07,
+          "total_s": 74.016,
+          "wall_time_s": 77.316
+        },
+        {
+          "task_id": "json_parse",
+          "category": "JSON Handling",
+          "answer": "```python\nimport json\n\ndef get_action_from_json(json_str):\n    try:\n        data = json.loads(json_str)\n        return data.get('action', None)\n    except json.JSONDecodeError:\n        return None\n```",
+          "json_parseable": false,
+          "task_success": true,
+          "tokens_generated": 47,
+          "tokens_per_sec": 3.15,
+          "ttft_s": 4.824,
+          "generation_s": 14.932,
+          "total_s": 21.086,
+          "wall_time_s": 24.998
+        },
+        {
+          "task_id": "file_read",
+          "category": "Tool Use Reasoning",
+          "answer": "```json\n{\"action\": \"read_file\", \"args\": {\"path\": \"data.txt\"}}\n```",
+          "json_parseable": true,
+          "task_success": true,
+          "tokens_generated": 22,
+          "tokens_per_sec": 2.71,
+          "ttft_s": 7.909,
+          "generation_s": 8.128,
+          "total_s": 17.75,
+          "wall_time_s": 22.273
+        },
+        {
+          "task_id": "error_handling",
+          "category": "Robustness",
+          "answer": "```python\ndef safe_divide(a, b):\n    try:\n        return a / b\n    except ZeroDivisionError:\n        return None\n    except TypeError:\n        return None\n```",
+          "json_parseable": null,
+          "task_success": true,
+          "tokens_generated": 40,
+          "tokens_per_sec": 3.24,
+          "ttft_s": 4.001,
+          "generation_s": 12.363,
+          "total_s": 18.058,
+          "wall_time_s": 21.91
+        },
+        {
+          "task_id": "privacy_reasoning",
+          "category": "Privacy Framing",
+          "answer": "```json\n{\n  \"reasons\": [\n    {\n      \"title\": \"Data Sovereignty\",\n      \"description\": \"Using a local model ensures that all data remains within the developer's control, adhering to regional data protection laws and regulations.\"\n    },\n    {\n      \"title\": \"Reduced Exposure\",\n      \"description\": \"Local processing minimizes the risk of data breaches by not transmitting sensitive information over ",
+          "json_parseable": null,
+          "task_success": true,
+          "tokens_generated": 148,
+          "tokens_per_sec": 3.18,
+          "ttft_s": 6.005,
+          "generation_s": 46.475,
+          "total_s": 52.966,
+          "wall_time_s": 56.678
+        }
+      ],
+      "mean_tokens_per_sec": 3.08,
+      "mean_ttft_s": 6.202,
+      "mean_total_s": 36.775,
+      "json_parse_rate": 0.5,
+      "task_success_rate": 1.0
+    }
+  ]
+}
