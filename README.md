@@ -210,7 +210,7 @@ python main.py --model tinyllama-json-agent
 
 ---
 
-## Real-Time Streaming & Multimodal Agent (Project 5)
+## Real-Time Streaming & Multimodal Agent 
 
 The agent loop now streams token-by-token via Server-Sent Events, and accepts CI error screenshots as a second input modality.
 
