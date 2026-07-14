@@ -132,7 +132,7 @@ def main() -> None:
     print_summary_table(results)
     md  = generate_markdown(results)
     out = args.output or str(results_path).replace(".json", "_report.md")
-    Path(out).write_text(md)
+    Path(out).write_text(md, encoding="utf-8")
     print(f"Markdown report saved → {out}")
 
 
