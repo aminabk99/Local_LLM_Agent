@@ -207,3 +207,107 @@ ollama create tinyllama-json-agent -f Modelfile
 # Use in the agent
 python main.py --model tinyllama-json-agent
 ```
+
+---
+
+## Real-Time Streaming & Multimodal Agent (Project 5)
+
+The agent loop now streams token-by-token via Server-Sent Events, and accepts CI error screenshots as a second input modality.
+
+### Architecture
+
+```
+User task (+ optional screenshot)
+           │
+           ▼
+POST /stream/run          — streams every agent step in real time
+POST /stream/run (image)  — llava extracts errors from screenshot → injects into task
+           │
+  ┌────────┴──────────────────────────────────┐
+  │  step_start → token → token → action      │
+  │  → tool_start → tool_done → step_start... │
+  │  → finish                                  │
+  └────────────────────────────────────────────┘
+         Server-Sent Events (one frame per event)
+```
+
+### Quick start
+
+```bash
+# Install streaming deps
+pip install httpx uvicorn fastapi
+
+# Start the streaming server (separate from the CLI agent)
+uvicorn streaming.sse_server:app --host 0.0.0.0 --port 8001 --reload
+
+# Demo client (in another terminal)
+python -m streaming.sse_server client
+```
+
+### Text-only task
+
+```python
+import httpx, json
+
+async with httpx.AsyncClient(timeout=300) as client:
+    async with client.stream(
+        "POST", "http://localhost:8001/stream/run",
+        json={"task": "Write a hello world script and run it."}
+    ) as resp:
+        async for line in resp.aiter_lines():
+            if line.startswith("data:"):
+                event = json.loads(line[5:])
+                if event["type"] == "token":
+                    print(event["text"], end="", flush=True)
+                elif event["type"] == "tool_done":
+                    print(f"\n[{event['tool']}] {event['result'][:80]}")
+                elif event["type"] == "finish":
+                    print(f"\nDone in {event['total_steps']} steps")
+```
+
+### Multimodal task (with error screenshot)
+
+```python
+import base64
+
+with open("terminal_error.png", "rb") as f:
+    image_b64 = base64.b64encode(f.read()).decode()
+
+async with client.stream(
+    "POST", "http://localhost:8001/stream/run",
+    json={"task": "Fix the failing tests", "image_b64": image_b64}
+) as resp:
+    async for line in resp.aiter_lines():
+        event = json.loads(line[5:])
+        if event["type"] == "vision_done":
+            print(f"[Screenshot context] {event['augmented_task'][:200]}")
+        elif event["type"] == "token":
+            print(event["text"], end="", flush=True)
+```
+
+llava reads the screenshot, extracts visible error messages/tracebacks, and injects them into the task description so the agent has full context without you having to manually copy error text.
+
+### SSE event reference
+
+| Event type | Key fields | When |
+|-----------|-----------|------|
+| `start` | task, model | Agent loop begins |
+| `step_start` | step, max_steps | Each new step |
+| `token` | text, step, elapsed_ms | Each LLM token |
+| `action` | action dict, step | LLM output parsed |
+| `tool_start` | tool, step | Before tool execution |
+| `tool_done` | tool, result, elapsed_ms | After tool returns |
+| `step_timeout` | step | Step exceeded timeout |
+| `finish` | result, total_steps, total_ms | Agent completes |
+| `vision_start` | — | Screenshot analysis begins |
+| `vision_done` | augmented_task | Screenshot analysis complete |
+
+### What's in `streaming/`
+
+| File | Purpose |
+|------|---------|
+| `config.py` | Step timeout, model, max steps |
+| `stream_llm.py` | Ollama streaming for one action step — yields token events |
+| `stream_agent.py` | Full agent loop emitting step/tool/finish events |
+| `multimodal.py` | llava screenshot → extracted error context → task injection |
+| `sse_server.py` | FastAPI app: `POST /stream/run`, `GET /health` |
