@@ -1,0 +1,1142 @@
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+new file mode 100644
+index 0000000..2704dcc
+--- /dev/null
++++ b/.github/workflows/tests.yml
+@@ -0,0 +1,21 @@
++name: Tests
++
++on:
++  push:
++  pull_request:
++
++jobs:
++  pytest:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-python@v5
++        with:
++          python-version: "3.11"
++      - name: Install deps
++        run: |
++          python -m pip install --upgrade pip
++          pip install -r requirements.txt
++          pip install pytest
++      - name: Run tests (no Ollama needed)
++        run: pytest -q
+diff --git a/README.md b/README.md
+index c7959b6..1227bc2 100644
+--- a/README.md
++++ b/README.md
+@@ -26,14 +26,35 @@ A Python coding agent powered by **Ollama + qwen2.5-coder:7b** that takes a task
+ 
+ ---
+ 
++## The AI layer
++
++The agent isn't just a prompt in a loop — it implements two published agent techniques and leans on constrained decoding for reliability.
++
++### ReAct — reason, act, observe (Yao et al., 2023)
++> Yao, S. et al. *ReAct: Synergizing Reasoning and Acting in Language Models.* ICLR 2023.
++
++Each step the model observes the tool history and emits **one** grounded action as JSON; the agent executes it, appends the observation, and loops. That observe→act→observe cycle is ReAct: the model reasons over concrete tool results rather than hallucinating a whole plan up front. Implemented as the single loop in `agent/core.py`.
++
++### Reflexion — verbal self-correction on failure (Shinn et al., 2023)
++> Shinn, N. et al. *Reflexion: Language Agents with Verbal Reinforcement Learning.* NeurIPS 2023.
++
++When a `run` command exits non-zero, the agent doesn't just retry blindly. It makes a short **reflection** call — "why did that fail, what will you change?" — and injects that self-critique back into the history as an observation before the next action. So a failed test run becomes a diagnosis the next step can act on. Implemented as `OllamaLLM.reflect()`, gated by `AGENT_REFLECT` (default on).
++
++### Structured decoding — the real JSON fix
++Every step calls `json.loads()` on the model output, so a single malformed object breaks the loop. Rather than rely on cleanup, the agent asks Ollama for `format="json"`, which **constrains decoding to valid JSON** — the model structurally cannot emit markdown fences or prose prefixes. The `{...}`-slice recovery parser is kept only as a fallback. (The `finetune/` track below is the alternative approach: teach a small model the format via LoRA/DPO instead of constraining it.)
++
++---
++
++---
++
+ ## Setup
+ 
+ **Requirements:** Python 3.11+ · [Ollama](https://ollama.com)
+ 
+ **1. Clone & install**
+ ```bash
+-git clone https://github.com/aminabk99/AI_LLM
+-cd AI_LLM
++git clone https://github.com/aminabk99/Local_LLM_Agent
++cd Local_LLM_Agent
+ python -m venv venv && source venv/Scripts/activate  # Windows
+ pip install -r requirements.txt
+ ```
+@@ -67,12 +88,16 @@ AI_LLM/
+ │   ├── agent.py             # Agent runner — orchestrates the JSON action loop
+ │   ├── core.py              # CodingAgent class with step logic and approval gate
+ │   ├── llm_ollama.py        # Ollama API client with JSON recovery and 600s timeout
+-│   ├── prompts.py           # System prompt and user prompt builder
+-│   ├── tools.py             # Workspace (list/read/write files) + run_command
++│   ├── prompts.py           # System prompt, ReAct prompt builder, Reflexion prompt
++│   ├── tools.py             # Workspace (list/read/write) + run_command + destructive denylist
+ │   └── ui.html              # Dark-themed web UI served at /
++├── tests/                   # pytest: sandbox traversal, JSON recovery, agent loop (no Ollama needed)
++├── .github/workflows/       # CI — runs pytest on every push
+ └── workspace/               # Sandboxed folder — agent reads/writes only here
+ ```
+ 
++**Config via environment variables:** `AGENT_MODEL` (default `qwen2.5-coder:7b`), `AGENT_MAX_STEPS` (20), `AGENT_ALLOW_SHELL` (true), `AGENT_REQUIRE_APPROVAL` (false), `AGENT_REFLECT` (true), `AGENT_CORS_ORIGINS` (localhost only).
++
+ ---
+ 
+ ## API
+@@ -93,6 +118,8 @@ Returns:
+ }
+ ```
+ 
++Sessions are multi-turn: prior turns are passed back into the agent as conversation context, so follow-up messages build on earlier ones.
++
+ **GET `/history/{session_id}`** — retrieve full chat history for a session
+ 
+ **DELETE `/history/{session_id}`** — clear a session
+@@ -100,7 +127,7 @@ Returns:
+ ---
+ 
+ ## Hardest Part
+-**JSON recovery from a chatty model** — `qwen2.5-coder:7b` sometimes wraps its JSON in markdown code fences or adds explanation text before the object. The fallback parser scans for the first `{` and last `}` in the response and attempts to extract valid JSON from that slice — which handles ~95% of malformed outputs without needing to re-prompt.
++**Getting reliable JSON out of a chatty model.** `qwen2.5-coder:7b` would wrap its JSON in markdown fences or prefix it with prose, and every step calls `json.loads()`, so one bad object breaks the loop. The fix is layered: Ollama's `format="json"` constrains decoding to valid JSON at the source, a `{`…`}`-slice parser recovers anything that still slips through, and if both fail the agent finishes gracefully with the raw output rather than crashing. The `finetune/` track takes the orthogonal route — teaching a small model the format directly with LoRA + DPO.
+ 
+ ## Most Interesting
+ **The 600s timeout** — on first run, Ollama has to load the full 7B model into memory which can take 30–60 seconds on a CPU. Without the extended timeout the agent would crash before the model even responded. A short retry message explains what happened if it still times out, rather than just throwing an exception.
+@@ -109,9 +136,10 @@ Returns:
+ 
+ ## Security
+ 
+-- All file operations are restricted to `workspace/` — path traversal attempts raise a `ValueError`
+-- Shell commands run with `cwd=workspace` — the agent cannot touch files outside the sandbox
+-- No API keys, no cloud calls — the model runs entirely on your machine
++- **File operations are jailed to `workspace/`** — paths are resolved and checked with `is_relative_to`, and traversal attempts (`../…`) raise a `ValueError`. This part is a real boundary and is covered by tests.
++- **Shell execution is best-effort, not a sandbox — stated honestly.** `run_command` uses a real shell, so a command like `cd .. && …` can technically reach outside `workspace/`. Mitigations: a denylist blocks obviously destructive commands (`rm -rf /`, fork bombs, `mkfs`, …), and shell can be turned off entirely with `AGENT_ALLOW_SHELL=false`. For untrusted input, disable shell or run the whole thing in a container.
++- **Web exposure is locked down by default.** CORS defaults to localhost only (`AGENT_CORS_ORIGINS`), and the server binds to `127.0.0.1`. Set `AGENT_REQUIRE_APPROVAL=true` to gate every write/run behind a manual `y/n` when running the CLI.
++- **No API keys, no cloud calls** — the model runs entirely on your machine.
+ 
+ ---
+ 
+@@ -121,9 +149,11 @@ Returns:
+ 
+ ---
+ 
+-## Fine-Tuning with LoRA & DPO
++## Fine-Tuning with LoRA & DPO (alternative track)
++
++**In the shipped agent, JSON reliability is handled at inference by Ollama's `format="json"` constrained decoding — not by fine-tuning.** This section is a separate, self-contained experiment: *can a tiny model be taught the action format directly, so it emits clean JSON without constrained decoding?* It's here as a learning exercise and a portfolio piece, not a dependency of the running agent.
+ 
+-The JSON action loop is a precision formatting task — ideal for LoRA fine-tuning. The model must emit exactly one JSON object per step with the right action key and required fields. Any deviation (markdown fences, prose prefix, wrong keys) breaks the agent loop.
++The JSON action loop is a precision formatting task: exactly one JSON object per step, right action key, required fields present. Any deviation breaks the loop — which makes it a clean target for LoRA SFT + DPO.
+ 
+ ### What's in `finetune/`
+ 
+@@ -168,15 +198,17 @@ python -m finetune.train_dpo
+ python -m finetune.eval --adapter both
+ ```
+ 
+-### Expected results (illustrative)
++### How it's evaluated
++
++`finetune/eval.py` runs the base model and the fine-tuned adapter on the same agent prompts and reports three rates:
+ 
+-| Model | JSON Parse Rate | Action Valid | Keys Complete |
+-|-------|----------------|--------------|---------------|
+-| Base TinyLlama | ~45% | ~38% | ~30% |
+-| + SFT (LoRA r=16) | ~82% | ~79% | ~74% |
+-| + DPO (SFT→DPO) | ~91% | ~88% | ~85% |
++| Metric | Meaning |
++|--------|---------|
++| JSON parse rate | fraction of responses that are valid, parseable JSON |
++| Action validity | JSON is valid **and** the `action` key is a known action |
++| Key completeness | all required keys are present for the chosen action |
+ 
+-> **Why JSON parse rate is the key metric:** every step in the agent loop calls `json.loads()` on the model output. A failed parse = a broken step. The benchmark (`benchmark/run_benchmark.py`) measured the base tinyllama at ~40% JSON parse rate on action-format prompts. The fine-tuned adapter targets >85%.
++> **No results are checked into this repo.** Training an adapter needs a GPU, and no adapter or eval run is committed here, so I'm not quoting parse-rate numbers I haven't produced — run `python -m finetune.eval --adapter both` to generate real before/after figures on your own hardware. JSON parse rate is the metric that matters because every agent step calls `json.loads()`, so a failed parse is a broken step. (For context, the local `benchmark/` run only exercises JSON formatting on a single task, so it isn't a parse-*rate* — it's one datapoint, not a benchmark of the format.)
+ 
+ ### Running with the fine-tuned adapter in Ollama
+ 
+diff --git a/agent/agent.py b/agent/agent.py
+index 03843e5..4b7c487 100644
+--- a/agent/agent.py
++++ b/agent/agent.py
+@@ -1,48 +1,40 @@
++"""Thin entry point: build a CodingAgent from env config and run one task.
++
++Kept as a stable function for the FastAPI server (`main.py`). All loop logic
++lives in `agent.core.CodingAgent` -- this module no longer duplicates it.
++"""
++
+ from __future__ import annotations
++
++import os
++
+ from agent.core import CodingAgent, AgentConfig
+ from agent.llm_ollama import OllamaLLM
+ from agent.tools import Workspace
+ 
+ 
+-def run_agent(task: str, history: list[dict], workspace: str = "workspace") -> tuple[str, int]:
+-    """
+-    Run the coding agent on a task.
++def _env_bool(name: str, default: bool) -> bool:
++    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
++
++
++def run_agent(
++    task: str,
++    history: list[dict] | None = None,
++    workspace: str = "workspace",
++) -> tuple[str, int]:
++    """Run the coding agent on a task.
++
++    `history` is the prior conversation ([{role, content}, ...]) so multi-turn
++    sessions actually carry context into the loop.
+     Returns (final_reply, steps_taken).
+     """
+-    llm = OllamaLLM(model="qwen2.5-coder:7b")
++    llm = OllamaLLM()
+     ws = Workspace(workspace_dir=workspace)
+-    config = AgentConfig(max_steps=20, require_approval=False)
++    config = AgentConfig(
++        max_steps=int(os.getenv("AGENT_MAX_STEPS", "20")),
++        require_approval=_env_bool("AGENT_REQUIRE_APPROVAL", False),
++        allow_shell=_env_bool("AGENT_ALLOW_SHELL", True),
++        reflect_on_failure=_env_bool("AGENT_REFLECT", True),
++    )
+     agent = CodingAgent(llm=llm, workspace=ws, config=config)
+-
+-    steps = 0
+-    state = {"task": task, "history": []}
+-
+-    for step in range(1, config.max_steps + 1):
+-        steps = step
+-        msg = llm.next_action(state)
+-        action = msg.get("action")
+-
+-        if action == "finish":
+-            return msg.get("final", "Done."), steps
+-
+-        elif action == "list_files":
+-            res = ws.list_files()
+-            state["history"].append({"tool": "list_files", "result": res.output})
+-
+-        elif action == "read_file":
+-            res = ws.read_text(msg.get("path", ""))
+-            state["history"].append({"tool": "read_file", "result": res.output})
+-
+-        elif action == "write_file":
+-            res = ws.write_text(msg.get("path", ""), msg.get("content", ""))
+-            state["history"].append({"tool": "write_file", "result": res.output})
+-
+-        elif action == "run":
+-            from agent.tools import run_command
+-            res = run_command(msg.get("cmd", ""))
+-            state["history"].append({"tool": "run", "result": res.output})
+-
+-        else:
+-            state["history"].append({"tool": "error", "result": f"Unknown action: {msg}"})
+-
+-    return "Stopped: max steps reached.", steps
++    return agent.run(task, conversation=history or [])
+diff --git a/agent/core.py b/agent/core.py
+index edc2ac9..1dd0714 100644
+--- a/agent/core.py
++++ b/agent/core.py
+@@ -1,55 +1,84 @@
+-from __future__ import annotations
+-from dataclasses import dataclass
+-from typing import Dict, Any
+-from rich.console import Console
+-from agent.tools import Workspace, run_command
+-
+-console = Console()
+-
+-@dataclass
+-class AgentConfig:
+-    max_steps: int = 20
+-    require_approval: bool = True
+-
+-class CodingAgent:
+-    def __init__(self, llm, workspace: Workspace, config: AgentConfig = AgentConfig()):
+-        self.llm = llm
+-        self.ws = workspace
+-        self.config = config
+-
+-    def _approve(self, action_desc: str) -> bool:
+-        if not self.config.require_approval:
+-            return True
+-        console.print(f"\n[bold yellow]Approve action?[/bold yellow] {action_desc}")
+-        return input("Type 'y' to approve: ").strip().lower() == "y"
+-
+-    def run(self, user_task: str) -> str:
+-        state: Dict[str, Any] = {"task": user_task, "history": []}
+-
+-        for step in range(1, self.config.max_steps + 1):
+-            console.print(f"\n[bold cyan]Step {step}/{self.config.max_steps}[/bold cyan]")
+-            msg = self.llm.next_action(state)
+-            action = msg.get("action")
+-
+-            if action == "finish":
+-                return msg.get("final", "Done.")
+-
+-            if action == "list_files":
+-                res = self.ws.list_files()
+-                state["history"].append({"tool": "list_files", "result": res.output})
+-
+-            elif action == "write_file":
+-                if self._approve(f"write_file {msg['path']}"):
+-                    res = self.ws.write_text(msg["path"], msg["content"])
+-                    state["history"].append({"tool": "write_file", "result": res.output})
+-
+-            elif action == "run":
+-                if self._approve(f"run {msg['cmd']}"):
+-                    res = run_command(msg["cmd"])
+-                    state["history"].append({"tool": "run", "result": res.output})
+-
+-            else:
+-                state["history"].append({"tool": "error", "result": f"Unknown action: {msg}"})
+-
+-        return "Stopped: max steps reached."
+-
++"""The single agent loop (ReAct + Reflexion).
++
++This is the one place the action loop lives. `agent.agent.run_agent` is a thin
++wrapper around it so the FastAPI server and the CLI share identical behaviour.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Any, Dict, List, Tuple
++
++from rich.console import Console
++
++from agent.tools import Workspace, run_command
++
++console = Console()
++
++
++@dataclass
++class AgentConfig:
++    max_steps: int = 20
++    require_approval: bool = False   # CLI human-in-the-loop for write/run
++    allow_shell: bool = True         # gate the `run` action entirely
++    reflect_on_failure: bool = True  # Reflexion step after a failed command
++
++
++class CodingAgent:
++    def __init__(self, llm, workspace: Workspace, config: AgentConfig | None = None):
++        self.llm = llm
++        self.ws = workspace
++        self.config = config or AgentConfig()
++
++    def _approve(self, action_desc: str) -> bool:
++        if not self.config.require_approval:
++            return True
++        console.print(f"\n[bold yellow]Approve action?[/bold yellow] {action_desc}")
++        try:
++            return input("Type 'y' to approve: ").strip().lower() == "y"
++        except EOFError:
++            return False
++
++    def run(self, task: str, conversation: List[dict] | None = None) -> Tuple[str, int]:
++        state: Dict[str, Any] = {"task": task, "history": []}
++        steps = 0
++
++        for step in range(1, self.config.max_steps + 1):
++            steps = step
++            msg = self.llm.next_action(state, conversation)
++            action = msg.get("action")
++
++            if action == "finish":
++                return msg.get("final", "Done."), steps
++
++            if action == "list_files":
++                res = self.ws.list_files()
++                state["history"].append({"tool": "list_files", "result": res.output})
++
++            elif action == "read_file":
++                res = self.ws.read_text(msg.get("path", ""))
++                state["history"].append({"tool": "read_file", "result": res.output})
++
++            elif action == "write_file":
++                if self._approve(f"write_file {msg.get('path')}"):
++                    res = self.ws.write_text(msg.get("path", ""), msg.get("content", ""))
++                    state["history"].append({"tool": "write_file", "result": res.output})
++                else:
++                    state["history"].append({"tool": "write_file", "result": "Skipped (not approved)."})
++
++            elif action == "run":
++                if not self.config.allow_shell:
++                    state["history"].append({"tool": "run", "result": "Blocked: shell execution is disabled."})
++                elif self._approve(f"run {msg.get('cmd')}"):
++                    res = run_command(msg.get("cmd", ""), cwd=str(self.ws.root))
++                    state["history"].append({"tool": "run", "result": res.output})
++                    if not res.ok and self.config.reflect_on_failure:
++                        note = self.llm.reflect(task, state["history"], res.output)
++                        state["history"].append({"tool": "reflection", "result": note})
++                else:
++                    state["history"].append({"tool": "run", "result": "Skipped (not approved)."})
++
++            else:
++                state["history"].append({"tool": "error", "result": f"Unknown action: {msg}"})
++
++        return "Stopped: max steps reached.", steps
+diff --git a/agent/llm_ollama.py b/agent/llm_ollama.py
+index 6bb5434..8af2fc9 100644
+--- a/agent/llm_ollama.py
++++ b/agent/llm_ollama.py
+@@ -1,81 +1,111 @@
+-from __future__ import annotations
+-
+-from typing import Dict, Any
+-import json
+-import requests
+-
+-from agent.prompts import SYSTEM_PROMPT, build_user_prompt
+-
+-
+-class OllamaLLM:
+-    """
+-    Talks to a local Ollama server (default: http://localhost:11434) using /api/generate.
+-
+-    Fixes included:
+-    - Much longer timeout (600s) to avoid ReadTimeout on first model warm-up
+-    - num_predict cap to keep responses short and fast (important for JSON-only agents)
+-    - Slightly lower temperature for more consistent JSON formatting
+-    """
+-
+-    def __init__(self, model: str = "qwen2.5-coder:7b", base_url: str = "http://localhost:11434"):
+-        self.model = model
+-        self.base_url = base_url.rstrip("/")
+-
+-    def next_action(self, state: Dict[str, Any]) -> Dict[str, Any]:
+-        payload = {
+-            "model": self.model,
+-            "prompt": build_user_prompt(state["task"], state["history"]),
+-            "system": SYSTEM_PROMPT,
+-            "stream": False,
+-            "options": {
+-                "temperature": 0.2,
+-                "num_predict": 300,   # caps output tokens (prevents rambling + helps avoid timeouts)
+-            },
+-        }
+-
+-        # Longer timeout to handle slow first-run model loading
+-        try:
+-            r = requests.post(f"{self.base_url}/api/generate", json=payload, timeout=600)
+-            r.raise_for_status()
+-        except requests.exceptions.ReadTimeout:
+-            return {
+-                "action": "finish",
+-                "final": (
+-                    "Ollama API call timed out. The model may still be loading or your machine is slow.\n"
+-                    "Try:\n"
+-                    "1) Run `ollama ps` to check if the model is running\n"
+-                    "2) Use a smaller model like `qwen2.5-coder:3b`\n"
+-                    "3) Re-run the agent after the model warms up"
+-                ),
+-            }
+-        except Exception as e:
+-            return {"action": "finish", "final": f"Failed to call Ollama API: {type(e).__name__}: {e}"}
+-
+-        text = r.json().get("response", "").strip()
+-
+-        # Strict JSON parse, with a recovery attempt if the model adds extra text
+-        try:
+-            obj = json.loads(text)
+-            if not isinstance(obj, dict):
+-                raise ValueError("Model returned JSON but not an object.")
+-            return obj
+-        except Exception:
+-            start = text.find("{")
+-            end = text.rfind("}")
+-            if start != -1 and end != -1 and end > start:
+-                try:
+-                    obj = json.loads(text[start:end + 1])
+-                    if isinstance(obj, dict):
+-                        return obj
+-                except Exception:
+-                    pass
+-
+-            # If we can't recover JSON, stop and show raw output to you
+-            return {
+-                "action": "finish",
+-                "final": (
+-                    "Model did not return valid JSON.\n\n"
+-                    f"Raw output:\n{text}\n\n"
+-                    "Tip: If this keeps happening, we can tighten the prompt or reduce temperature further."
+-                ),
+-            }
++from __future__ import annotations
++
++from typing import Dict, Any, List
++import json
++import os
++import requests
++
++from agent.prompts import (
++    SYSTEM_PROMPT,
++    build_user_prompt,
++    build_reflection_prompt,
++)
++
++
++class OllamaLLM:
++    """Talks to a local Ollama server via /api/generate.
++
++    Reliability features:
++    - format="json": Ollama constrains decoding to valid JSON, so the model
++      cannot emit markdown fences or prose prefixes in the first place. This is
++      the structural fix for the "chatty model" problem; the {..} slice parser
++      below is kept only as a belt-and-braces fallback.
++    - keep_alive: the model stays resident between the up-to-20 agent steps
++      instead of unloading and re-warming each call.
++    - 600s timeout to survive the cold first-load of a 7B model on CPU.
++    - num_predict cap to keep single-action responses short.
++    """
++
++    def __init__(
++        self,
++        model: str | None = None,
++        base_url: str = "http://localhost:11434",
++        keep_alive: str = "30m",
++    ):
++        self.model = model or os.getenv("AGENT_MODEL", "qwen2.5-coder:7b")
++        self.base_url = base_url.rstrip("/")
++        self.keep_alive = keep_alive
++
++    def _generate(self, prompt: str, *, system: str, as_json: bool) -> str:
++        payload: Dict[str, Any] = {
++            "model": self.model,
++            "prompt": prompt,
++            "system": system,
++            "stream": False,
++            "keep_alive": self.keep_alive,
++            "options": {"temperature": 0.2, "num_predict": 300},
++        }
++        if as_json:
++            payload["format"] = "json"
++        r = requests.post(f"{self.base_url}/api/generate", json=payload, timeout=600)
++        r.raise_for_status()
++        return r.json().get("response", "").strip()
++
++    def next_action(
++        self,
++        state: Dict[str, Any],
++        conversation: List[dict] | None = None,
++    ) -> Dict[str, Any]:
++        prompt = build_user_prompt(state["task"], state["history"], conversation)
++        try:
++            text = self._generate(prompt, system=SYSTEM_PROMPT, as_json=True)
++        except requests.exceptions.ReadTimeout:
++            return {
++                "action": "finish",
++                "final": (
++                    "Ollama API call timed out. The model may still be loading or "
++                    "your machine is slow.\nTry:\n"
++                    "1) `ollama ps` to check if the model is running\n"
++                    "2) a smaller model, e.g. AGENT_MODEL=qwen2.5-coder:3b\n"
++                    "3) re-run after the model warms up"
++                ),
++            }
++        except Exception as e:
++            return {"action": "finish", "final": f"Failed to call Ollama API: {type(e).__name__}: {e}"}
++
++        return self._parse_json(text)
++
++    def reflect(self, task: str, history: List[dict], error: str) -> str:
++        """Reflexion self-critique after a failed command. Plain text, best-effort."""
++        prompt = build_reflection_prompt(task, history, error)
++        try:
++            return self._generate(prompt, system="You are a concise debugging assistant.", as_json=False)
++        except Exception:
++            return "(reflection unavailable)"
++
++    @staticmethod
++    def _parse_json(text: str) -> Dict[str, Any]:
++        # With format="json" this almost always succeeds on the first try.
++        try:
++            obj = json.loads(text)
++            if isinstance(obj, dict):
++                return obj
++        except Exception:
++            pass
++        # Fallback: slice the first {...} span.
++        start, end = text.find("{"), text.rfind("}")
++        if start != -1 and end > start:
++            try:
++                obj = json.loads(text[start:end + 1])
++                if isinstance(obj, dict):
++                    return obj
++            except Exception:
++                pass
++        return {
++            "action": "finish",
++            "final": (
++                "Model did not return valid JSON.\n\n"
++                f"Raw output:\n{text}\n\n"
++                "Tip: ensure the Ollama version supports format=json, or lower temperature."
++            ),
++        }
+diff --git a/agent/prompts.py b/agent/prompts.py
+index 9eb3b29..02c60ed 100644
+--- a/agent/prompts.py
++++ b/agent/prompts.py
+@@ -1,32 +1,91 @@
+-SYSTEM_PROMPT = """You are an AI Software Engineer & Coding Agent.
+-
+-You MUST respond with ONE valid JSON object only. No markdown.
+-
+-You can choose ONE action per step from:
+-- "finish"
+-- "list_files"
+-- "read_file"   (requires: path)
+-- "write_file"  (requires: path, content)
+-- "run"         (requires: cmd)
+-
+-Rules:
+-- You may ONLY read/write files inside the workspace.
+-- Prefer small, incremental edits.
+-- After writing code, run a command to verify.
+-- If you see an error, fix it and try again.
+-"""
+-
+-def build_user_prompt(task: str, history: list[dict]) -> str:
+-    hist_text = ""
+-    for item in history[-12:]:
+-        hist_text += f"\nTOOL: {item.get('tool')}\nRESULT:\n{item.get('result')}\n"
+-
+-    return f"""TASK:
+-{task}
+-
+-RECENT TOOL HISTORY:
+-{hist_text}
+-
+-Now choose the next single action as JSON only.
+-"""
+-
++"""Prompt construction for the ReAct-style JSON action loop.
++
++The loop follows the ReAct pattern (Yao et al., 2023, "ReAct: Synergizing
++Reasoning and Acting in Language Models"): at each step the model observes the
++tool history and emits a single grounded action. On failure the agent runs a
++Reflexion step (Shinn et al., 2023) whose verbal self-critique is fed back in as
++an observation before the next action.
++"""
++
++from __future__ import annotations
++
++SYSTEM_PROMPT = """You are an AI Software Engineer & Coding Agent.
++
++You MUST respond with ONE valid JSON object only. No markdown, no prose.
++
++You can choose ONE action per step from:
++- "finish"      (requires: final)
++- "list_files"
++- "read_file"   (requires: path)
++- "write_file"  (requires: path, content)
++- "run"         (requires: cmd)
++
++Rules:
++- You may ONLY read/write files inside the workspace.
++- Prefer small, incremental edits.
++- After writing code, run a command to verify it.
++- If a step fails, read the error and REFLECTION note, then fix and retry.
++- When the task is done, use "finish" with a short summary in "final".
++"""
++
++# Keep individual observations from blowing up the context window on long runs.
++_MAX_RESULT_CHARS = 1500
++
++
++def _trim(text: str) -> str:
++    text = str(text)
++    if len(text) > _MAX_RESULT_CHARS:
++        return text[:_MAX_RESULT_CHARS] + f"\n... (trimmed, {len(text)} chars)"
++    return text
++
++
++def build_user_prompt(
++    task: str,
++    history: list[dict],
++    conversation: list[dict] | None = None,
++) -> str:
++    convo_text = ""
++    for turn in (conversation or [])[-6:]:
++        role = turn.get("role", "?")
++        convo_text += f"\n{role.upper()}: {_trim(turn.get('content', ''))}"
++
++    hist_text = ""
++    for item in history[-12:]:
++        tool = item.get("tool")
++        hist_text += f"\nTOOL: {tool}\nRESULT:\n{_trim(item.get('result'))}\n"
++
++    convo_block = f"CONVERSATION SO FAR:{convo_text}\n\n" if convo_text else ""
++
++    return f"""{convo_block}TASK:
++{task}
++
++RECENT TOOL HISTORY:
++{hist_text}
++
++Now choose the next single action as JSON only.
++"""
++
++
++def build_reflection_prompt(task: str, history: list[dict], error: str) -> str:
++    """Reflexion: ask the model to diagnose a failure in plain language.
++
++    The result is fed back into the loop as an observation, not executed.
++    """
++    hist_text = "".join(
++        f"\nTOOL: {i.get('tool')}\nRESULT:\n{_trim(i.get('result'))}\n"
++        for i in history[-6:]
++    )
++    return f"""You are debugging your own failed action.
++
++TASK:
++{task}
++
++RECENT STEPS:
++{hist_text}
++
++The last command FAILED with:
++{_trim(error)}
++
++In 1-3 sentences, explain the likely cause and what you will do differently on
++the next step. Plain text only, no JSON.
++"""
+diff --git a/agent/tools.py b/agent/tools.py
+index 3ec3bdb..b82e074 100644
+--- a/agent/tools.py
++++ b/agent/tools.py
+@@ -1,71 +1,107 @@
+-from __future__ import annotations
+-from dataclasses import dataclass
+-from pathlib import Path
+-import subprocess
+-import textwrap
+-
+-@dataclass
+-class ToolResult:
+-    ok: bool
+-    output: str
+-
+-class Workspace:
+-    """Safety: restrict all file operations to workspace folder only."""
+-    def __init__(self, workspace_dir: str = "workspace"):
+-        self.root = Path(workspace_dir).resolve()
+-        self.root.mkdir(parents=True, exist_ok=True)
+-
+-    def _safe_path(self, rel_path: str) -> Path:
+-        p = (self.root / rel_path).resolve()
+-        if self.root not in p.parents and p != self.root:
+-            raise ValueError("Path escapes workspace.")
+-        return p
+-
+-    def list_files(self) -> ToolResult:
+-        try:
+-            files = []
+-            for p in self.root.rglob("*"):
+-                if p.is_file():
+-                    files.append(str(p.relative_to(self.root)))
+-            return ToolResult(True, "\n".join(sorted(files)) if files else "(no files)")
+-        except Exception as e:
+-            return ToolResult(False, f"{type(e).__name__}: {e}")
+-
+-    def read_text(self, rel_path: str) -> ToolResult:
+-        try:
+-            p = self._safe_path(rel_path)
+-            return ToolResult(True, p.read_text(encoding="utf-8"))
+-        except Exception as e:
+-            return ToolResult(False, f"{type(e).__name__}: {e}")
+-
+-    def write_text(self, rel_path: str, content: str) -> ToolResult:
+-        try:
+-            p = self._safe_path(rel_path)
+-            p.parent.mkdir(parents=True, exist_ok=True)
+-            p.write_text(content, encoding="utf-8")
+-            return ToolResult(True, f"Wrote {rel_path} ({len(content)} chars)")
+-        except Exception as e:
+-            return ToolResult(False, f"{type(e).__name__}: {e}")
+-
+-def run_command(cmd: str, cwd: str = "workspace", timeout_sec: int = 120) -> ToolResult:
+-    """Run shell commands in workspace. Used for tests/build/debug."""
+-    try:
+-        result = subprocess.run(
+-            cmd,
+-            shell=True,
+-            cwd=cwd,
+-            capture_output=True,
+-            text=True,
+-            timeout=timeout_sec,
+-        )
+-        out = textwrap.dedent(f"""
+-        exit_code: {result.returncode}
+-        --- stdout ---
+-        {result.stdout.strip()}
+-        --- stderr ---
+-        {result.stderr.strip()}
+-        """).strip()
+-        return ToolResult(result.returncode == 0, out)
+-    except Exception as e:
+-        return ToolResult(False, f"{type(e).__name__}: {e}")
+-
++from __future__ import annotations
++from dataclasses import dataclass
++from pathlib import Path
++import re
++import subprocess
++import textwrap
++
++# Commands that could damage the host outside the sandbox. run_command uses a
++# shell, so a determined prompt can still try to escape the workspace (e.g.
++# `cd .. && ...`). This denylist is defense-in-depth, not a real jail -- see the
++# Security section of the README for the honest threat model.
++_DESTRUCTIVE = [
++    r"\brm\s+-rf\s+/",       # rm -rf /  (and /root, /home, etc.)
++    r"\brm\s+-rf\s+~",
++    r":\(\)\s*\{.*\};:",     # fork bomb
++    r"\bmkfs\b",
++    r"\bdd\s+if=",
++    r">\s*/dev/sd",
++    r"\bshutdown\b|\breboot\b",
++    r"\bchmod\s+-R\s+777\s+/",
++]
++
++
++@dataclass
++class ToolResult:
++    ok: bool
++    output: str
++
++
++class Workspace:
++    """Safety: restrict all file operations to the workspace folder only."""
++
++    def __init__(self, workspace_dir: str = "workspace"):
++        self.root = Path(workspace_dir).resolve()
++        self.root.mkdir(parents=True, exist_ok=True)
++
++    def _safe_path(self, rel_path: str) -> Path:
++        p = (self.root / rel_path).resolve()
++        # Path.is_relative_to (3.9+) is the correct, symlink-aware check.
++        if p != self.root and not p.is_relative_to(self.root):
++            raise ValueError("Path escapes workspace.")
++        return p
++
++    def list_files(self) -> ToolResult:
++        try:
++            files = [
++                str(p.relative_to(self.root))
++                for p in self.root.rglob("*")
++                if p.is_file()
++            ]
++            return ToolResult(True, "\n".join(sorted(files)) if files else "(no files)")
++        except Exception as e:
++            return ToolResult(False, f"{type(e).__name__}: {e}")
++
++    def read_text(self, rel_path: str, max_chars: int = 20_000) -> ToolResult:
++        try:
++            p = self._safe_path(rel_path)
++            text = p.read_text(encoding="utf-8")
++            if len(text) > max_chars:
++                text = text[:max_chars] + f"\n... (truncated, {len(text)} chars total)"
++            return ToolResult(True, text)
++        except Exception as e:
++            return ToolResult(False, f"{type(e).__name__}: {e}")
++
++    def write_text(self, rel_path: str, content: str) -> ToolResult:
++        try:
++            p = self._safe_path(rel_path)
++            p.parent.mkdir(parents=True, exist_ok=True)
++            p.write_text(content, encoding="utf-8")
++            return ToolResult(True, f"Wrote {rel_path} ({len(content)} chars)")
++        except Exception as e:
++            return ToolResult(False, f"{type(e).__name__}: {e}")
++
++
++def is_destructive(cmd: str) -> bool:
++    """True if the command matches a known host-damaging pattern."""
++    return any(re.search(pat, cmd) for pat in _DESTRUCTIVE)
++
++
++def run_command(cmd: str, cwd: str = "workspace", timeout_sec: int = 120) -> ToolResult:
++    """Run a shell command inside the workspace. Used for tests/build/debug.
++
++    The cwd is resolved so it points at the same absolute folder the Workspace
++    uses regardless of where the server was launched from.
++    """
++    if is_destructive(cmd):
++        return ToolResult(False, f"Blocked: command matches a destructive pattern: {cmd!r}")
++
++    root = Path(cwd).resolve()
++    root.mkdir(parents=True, exist_ok=True)
++    try:
++        result = subprocess.run(
++            cmd, shell=True, cwd=str(root),
++            capture_output=True, text=True, timeout=timeout_sec,
++        )
++        out = textwrap.dedent(f"""
++        exit_code: {result.returncode}
++        --- stdout ---
++        {result.stdout.strip()}
++        --- stderr ---
++        {result.stderr.strip()}
++        """).strip()
++        return ToolResult(result.returncode == 0, out)
++    except subprocess.TimeoutExpired as e:
++        return ToolResult(False, f"TimeoutExpired after {timeout_sec}s: {e}")
++    except Exception as e:
++        return ToolResult(False, f"{type(e).__name__}: {e}")
+diff --git a/main.py b/main.py
+index 7fa9118..81285d9 100644
+--- a/main.py
++++ b/main.py
+@@ -1,23 +1,33 @@
+ """
+-AI_LLM — Local LLM Coding Agent + Chat API
++Local_LLM_Agent -- Local LLM Coding Agent + Chat API
+ FastAPI server with /chat endpoint, tool calling, and dark-themed web UI.
+ Powered by Ollama (qwen2.5-coder:7b) running fully locally.
+ """
+ 
+-from fastapi import FastAPI, Request
+-from fastapi.responses import HTMLResponse, JSONResponse
++import os
++import uuid
++
++import uvicorn
++from fastapi import FastAPI
+ from fastapi.middleware.cors import CORSMiddleware
++from fastapi.responses import HTMLResponse, JSONResponse
+ from pydantic import BaseModel
+-import uvicorn
+-import uuid
+ 
+ from agent.agent import run_agent
+ 
+-app = FastAPI(title="AI_LLM Coding Agent", version="1.0.0")
++app = FastAPI(title="Local_LLM_Agent Coding Agent", version="1.1.0")
++
++# Default to localhost only. The agent can run shell commands, so a wide-open
++# CORS policy on a machine exposed to a network is a real risk. Override with
++# AGENT_CORS_ORIGINS="https://example.com,https://foo.com" if you know you need it.
++_origins = [o.strip() for o in os.getenv(
++    "AGENT_CORS_ORIGINS",
++    "http://localhost:8000,http://127.0.0.1:8000",
++).split(",") if o.strip()]
+ 
+ app.add_middleware(
+     CORSMiddleware,
+-    allow_origins=["*"],
++    allow_origins=_origins,
+     allow_methods=["*"],
+     allow_headers=["*"],
+ )
+@@ -40,47 +50,36 @@ class ChatResponse(BaseModel):
+ @app.get("/", response_class=HTMLResponse)
+ async def index():
+     """Serve the dark-themed web UI."""
+-    with open("agent/ui.html", "r") as f:
++    ui_path = os.path.join(os.path.dirname(__file__), "agent", "ui.html")
++    with open(ui_path, "r", encoding="utf-8") as f:
+         return HTMLResponse(content=f.read())
+ 
+ 
+ @app.post("/chat", response_model=ChatResponse)
+ async def chat(request: ChatRequest):
+-    """
+-    Main chat endpoint.
+-    Accepts a user message, runs it through the local LLM agent,
+-    and returns the agent's final response.
+-    """
++    """Run a user message through the local LLM agent and return its final reply."""
+     session_id = request.session_id or str(uuid.uuid4())
++    history = chat_sessions.setdefault(session_id, [])
+ 
+-    if session_id not in chat_sessions:
+-        chat_sessions[session_id] = []
++    # Pass PRIOR turns as conversation context, then record this turn.
++    reply, steps = run_agent(request.message, history=list(history), workspace="workspace")
+ 
+-    history = chat_sessions[session_id]
+     history.append({"role": "user", "content": request.message})
+-
+-    reply, steps = run_agent(request.message, history, workspace="workspace")
+-
+     history.append({"role": "assistant", "content": reply})
+-    chat_sessions[session_id] = history
+ 
+     return ChatResponse(reply=reply, session_id=session_id, steps_taken=steps)
+ 
+ 
+ @app.get("/history/{session_id}")
+ async def get_history(session_id: str):
+-    """Return full chat history for a session."""
+-    history = chat_sessions.get(session_id, [])
+-    return JSONResponse(content={"session_id": session_id, "history": history})
++    return JSONResponse(content={"session_id": session_id, "history": chat_sessions.get(session_id, [])})
+ 
+ 
+ @app.delete("/history/{session_id}")
+ async def clear_history(session_id: str):
+-    """Clear chat history for a session."""
+-    if session_id in chat_sessions:
+-        del chat_sessions[session_id]
++    chat_sessions.pop(session_id, None)
+     return JSONResponse(content={"message": "Session cleared."})
+ 
+ 
+ if __name__ == "__main__":
+-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
++    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+diff --git a/tests/__init__.py b/tests/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/test_agent_loop.py b/tests/test_agent_loop.py
+new file mode 100644
+index 0000000..f5e851e
+--- /dev/null
++++ b/tests/test_agent_loop.py
+@@ -0,0 +1,60 @@
++from agent.core import CodingAgent, AgentConfig
++from agent.tools import Workspace
++
++
++class ScriptedLLM:
++    """Returns a fixed sequence of actions; records reflect() calls."""
++    def __init__(self, actions):
++        self.actions = list(actions)
++        self.reflections = 0
++
++    def next_action(self, state, conversation=None):
++        return self.actions.pop(0) if self.actions else {"action": "finish", "final": "done"}
++
++    def reflect(self, task, history, error):
++        self.reflections += 1
++        return "It failed because the file was missing; I'll create it first."
++
++
++def test_write_then_finish(tmp_path):
++    ws = Workspace(str(tmp_path / "ws"))
++    llm = ScriptedLLM([
++        {"action": "write_file", "path": "hi.txt", "content": "yo"},
++        {"action": "finish", "final": "wrote hi.txt"},
++    ])
++    agent = CodingAgent(llm, ws, AgentConfig(require_approval=False))
++    reply, steps = agent.run("make a file")
++    assert reply == "wrote hi.txt" and steps == 2
++    assert ws.read_text("hi.txt").output == "yo"
++
++
++def test_reflexion_fires_on_failed_command(tmp_path):
++    ws = Workspace(str(tmp_path / "ws"))
++    llm = ScriptedLLM([
++        {"action": "run", "cmd": "false"},        # exits non-zero -> reflect
++        {"action": "finish", "final": "gave up gracefully"},
++    ])
++    agent = CodingAgent(llm, ws, AgentConfig(reflect_on_failure=True))
++    reply, steps = agent.run("run something that fails")
++    assert llm.reflections == 1
++    assert reply == "gave up gracefully"
++
++
++def test_shell_can_be_disabled(tmp_path):
++    ws = Workspace(str(tmp_path / "ws"))
++    llm = ScriptedLLM([
++        {"action": "run", "cmd": "echo hi"},
++        {"action": "finish", "final": "ok"},
++    ])
++    agent = CodingAgent(llm, ws, AgentConfig(allow_shell=False))
++    agent.run("try shell")
++    # no reflection, command was blocked not executed
++    assert llm.reflections == 0
++
++
++def test_max_steps_guard(tmp_path):
++    ws = Workspace(str(tmp_path / "ws"))
++    llm = ScriptedLLM([{"action": "list_files"} for _ in range(50)])
++    agent = CodingAgent(llm, ws, AgentConfig(max_steps=3))
++    reply, steps = agent.run("loop forever")
++    assert steps == 3 and "max steps" in reply
+diff --git a/tests/test_json_recovery.py b/tests/test_json_recovery.py
+new file mode 100644
+index 0000000..1bbf0f4
+--- /dev/null
++++ b/tests/test_json_recovery.py
+@@ -0,0 +1,22 @@
++from agent.llm_ollama import OllamaLLM
++
++parse = OllamaLLM._parse_json
++
++
++def test_clean_json():
++    assert parse('{"action": "finish", "final": "ok"}')["action"] == "finish"
++
++
++def test_markdown_fenced_json():
++    text = '```json\n{"action": "list_files"}\n```'
++    assert parse(text)["action"] == "list_files"
++
++
++def test_prose_prefixed_json():
++    text = 'Sure! Here is the action:\n{"action": "read_file", "path": "x.py"}'
++    assert parse(text)["path"] == "x.py"
++
++
++def test_unrecoverable_output_finishes_gracefully():
++    out = parse("I cannot help with that.")
++    assert out["action"] == "finish" and "did not return valid JSON" in out["final"]
+diff --git a/tests/test_tools.py b/tests/test_tools.py
+new file mode 100644
+index 0000000..fff7a90
+--- /dev/null
++++ b/tests/test_tools.py
+@@ -0,0 +1,43 @@
++import pytest
++from agent.tools import Workspace, run_command, is_destructive
++
++
++def test_write_read_list_roundtrip(tmp_path):
++    ws = Workspace(str(tmp_path / "ws"))
++    assert ws.write_text("a/b.txt", "hello").ok
++    r = ws.read_text("a/b.txt")
++    assert r.ok and r.output == "hello"
++    assert "a/b.txt" in ws.list_files().output
++
++
++def test_path_traversal_is_blocked(tmp_path):
++    ws = Workspace(str(tmp_path / "ws"))
++    with pytest.raises(ValueError):
++        ws._safe_path("../escape.txt")
++    # The public API surfaces the failure as ok=False, not a crash.
++    assert ws.read_text("../../etc/passwd").ok is False
++
++
++def test_read_truncates_large_files(tmp_path):
++    ws = Workspace(str(tmp_path / "ws"))
++    ws.write_text("big.txt", "x" * 50_000)
++    out = ws.read_text("big.txt", max_chars=1000).output
++    assert "truncated" in out and len(out) < 2000
++
++
++def test_destructive_commands_blocked():
++    assert is_destructive("rm -rf /")
++    assert is_destructive("sudo rm -rf ~")
++    assert not is_destructive("pytest -q")
++
++
++def test_run_command_executes_in_workspace(tmp_path):
++    ws = Workspace(str(tmp_path / "ws"))
++    res = run_command("echo hi", cwd=str(ws.root))
++    assert res.ok and "hi" in res.output
++
++
++def test_run_command_refuses_destructive(tmp_path):
++    ws = Workspace(str(tmp_path / "ws"))
++    res = run_command("rm -rf /", cwd=str(ws.root))
++    assert res.ok is False and "Blocked" in res.output

@@ -1,48 +1,40 @@
+"""Thin entry point: build a CodingAgent from env config and run one task.
+
+Kept as a stable function for the FastAPI server (`main.py`). All loop logic
+lives in `agent.core.CodingAgent` -- this module no longer duplicates it.
+"""
+
 from __future__ import annotations
+
+import os
+
 from agent.core import CodingAgent, AgentConfig
 from agent.llm_ollama import OllamaLLM
 from agent.tools import Workspace
 
 
-def run_agent(task: str, history: list[dict], workspace: str = "workspace") -> tuple[str, int]:
-    """
-    Run the coding agent on a task.
+def _env_bool(name: str, default: bool) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+
+
+def run_agent(
+    task: str,
+    history: list[dict] | None = None,
+    workspace: str = "workspace",
+) -> tuple[str, int]:
+    """Run the coding agent on a task.
+
+    `history` is the prior conversation ([{role, content}, ...]) so multi-turn
+    sessions actually carry context into the loop.
     Returns (final_reply, steps_taken).
     """
-    llm = OllamaLLM(model="qwen2.5-coder:7b")
+    llm = OllamaLLM()
     ws = Workspace(workspace_dir=workspace)
-    config = AgentConfig(max_steps=20, require_approval=False)
+    config = AgentConfig(
+        max_steps=int(os.getenv("AGENT_MAX_STEPS", "20")),
+        require_approval=_env_bool("AGENT_REQUIRE_APPROVAL", False),
+        allow_shell=_env_bool("AGENT_ALLOW_SHELL", True),
+        reflect_on_failure=_env_bool("AGENT_REFLECT", True),
+    )
     agent = CodingAgent(llm=llm, workspace=ws, config=config)
-
-    steps = 0
-    state = {"task": task, "history": []}
-
-    for step in range(1, config.max_steps + 1):
-        steps = step
-        msg = llm.next_action(state)
-        action = msg.get("action")
-
-        if action == "finish":
-            return msg.get("final", "Done."), steps
-
-        elif action == "list_files":
-            res = ws.list_files()
-            state["history"].append({"tool": "list_files", "result": res.output})
-
-        elif action == "read_file":
-            res = ws.read_text(msg.get("path", ""))
-            state["history"].append({"tool": "read_file", "result": res.output})
-
-        elif action == "write_file":
-            res = ws.write_text(msg.get("path", ""), msg.get("content", ""))
-            state["history"].append({"tool": "write_file", "result": res.output})
-
-        elif action == "run":
-            from agent.tools import run_command
-            res = run_command(msg.get("cmd", ""))
-            state["history"].append({"tool": "run", "result": res.output})
-
-        else:
-            state["history"].append({"tool": "error", "result": f"Unknown action: {msg}"})
-
-    return "Stopped: max steps reached.", steps
+    return agent.run(task, conversation=history or [])

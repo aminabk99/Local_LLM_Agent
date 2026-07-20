@@ -26,14 +26,35 @@ A Python coding agent powered by **Ollama + qwen2.5-coder:7b** that takes a task
 
 ---
 
+## The AI layer
+
+The agent isn't just a prompt in a loop — it implements two published agent techniques and leans on constrained decoding for reliability.
+
+### ReAct — reason, act, observe (Yao et al., 2023)
+> Yao, S. et al. *ReAct: Synergizing Reasoning and Acting in Language Models.* ICLR 2023.
+
+Each step the model observes the tool history and emits **one** grounded action as JSON; the agent executes it, appends the observation, and loops. That observe→act→observe cycle is ReAct: the model reasons over concrete tool results rather than hallucinating a whole plan up front. Implemented as the single loop in `agent/core.py`.
+
+### Reflexion — verbal self-correction on failure (Shinn et al., 2023)
+> Shinn, N. et al. *Reflexion: Language Agents with Verbal Reinforcement Learning.* NeurIPS 2023.
+
+When a `run` command exits non-zero, the agent doesn't just retry blindly. It makes a short **reflection** call — "why did that fail, what will you change?" — and injects that self-critique back into the history as an observation before the next action. So a failed test run becomes a diagnosis the next step can act on. Implemented as `OllamaLLM.reflect()`, gated by `AGENT_REFLECT` (default on).
+
+### Structured decoding — the real JSON fix
+Every step calls `json.loads()` on the model output, so a single malformed object breaks the loop. Rather than rely on cleanup, the agent asks Ollama for `format="json"`, which **constrains decoding to valid JSON** — the model structurally cannot emit markdown fences or prose prefixes. The `{...}`-slice recovery parser is kept only as a fallback. (The `finetune/` track below is the alternative approach: teach a small model the format via LoRA/DPO instead of constraining it.)
+
+---
+
+---
+
 ## Setup
 
 **Requirements:** Python 3.11+ · [Ollama](https://ollama.com)
 
 **1. Clone & install**
 ```bash
-git clone https://github.com/aminabk99/AI_LLM
-cd AI_LLM
+git clone https://github.com/aminabk99/Local_LLM_Agent
+cd Local_LLM_Agent
 python -m venv venv && source venv/Scripts/activate  # Windows
 pip install -r requirements.txt
 ```
@@ -67,11 +88,15 @@ AI_LLM/
 │   ├── agent.py             # Agent runner — orchestrates the JSON action loop
 │   ├── core.py              # CodingAgent class with step logic and approval gate
 │   ├── llm_ollama.py        # Ollama API client with JSON recovery and 600s timeout
-│   ├── prompts.py           # System prompt and user prompt builder
-│   ├── tools.py             # Workspace (list/read/write files) + run_command
+│   ├── prompts.py           # System prompt, ReAct prompt builder, Reflexion prompt
+│   ├── tools.py             # Workspace (list/read/write) + run_command + destructive denylist
 │   └── ui.html              # Dark-themed web UI served at /
+├── tests/                   # pytest: sandbox traversal, JSON recovery, agent loop (no Ollama needed)
+├── .github/workflows/       # CI — runs pytest on every push
 └── workspace/               # Sandboxed folder — agent reads/writes only here
 ```
+
+**Config via environment variables:** `AGENT_MODEL` (default `qwen2.5-coder:7b`), `AGENT_MAX_STEPS` (20), `AGENT_ALLOW_SHELL` (true), `AGENT_REQUIRE_APPROVAL` (false), `AGENT_REFLECT` (true), `AGENT_CORS_ORIGINS` (localhost only).
 
 ---
 
@@ -93,6 +118,8 @@ Returns:
 }
 ```
 
+Sessions are multi-turn: prior turns are passed back into the agent as conversation context, so follow-up messages build on earlier ones.
+
 **GET `/history/{session_id}`** — retrieve full chat history for a session
 
 **DELETE `/history/{session_id}`** — clear a session
@@ -100,7 +127,7 @@ Returns:
 ---
 
 ## Hardest Part
-**JSON recovery from a chatty model** — `qwen2.5-coder:7b` sometimes wraps its JSON in markdown code fences or adds explanation text before the object. The fallback parser scans for the first `{` and last `}` in the response and attempts to extract valid JSON from that slice — which handles ~95% of malformed outputs without needing to re-prompt.
+**Getting reliable JSON out of a chatty model.** `qwen2.5-coder:7b` would wrap its JSON in markdown fences or prefix it with prose, and every step calls `json.loads()`, so one bad object breaks the loop. The fix is layered: Ollama's `format="json"` constrains decoding to valid JSON at the source, a `{`…`}`-slice parser recovers anything that still slips through, and if both fail the agent finishes gracefully with the raw output rather than crashing. The `finetune/` track takes the orthogonal route — teaching a small model the format directly with LoRA + DPO.
 
 ## Most Interesting
 **The 600s timeout** — on first run, Ollama has to load the full 7B model into memory which can take 30–60 seconds on a CPU. Without the extended timeout the agent would crash before the model even responded. A short retry message explains what happened if it still times out, rather than just throwing an exception.
@@ -109,9 +136,10 @@ Returns:
 
 ## Security
 
-- All file operations are restricted to `workspace/` — path traversal attempts raise a `ValueError`
-- Shell commands run with `cwd=workspace` — the agent cannot touch files outside the sandbox
-- No API keys, no cloud calls — the model runs entirely on your machine
+- **File operations are jailed to `workspace/`** — paths are resolved and checked with `is_relative_to`, and traversal attempts (`../…`) raise a `ValueError`. This part is a real boundary and is covered by tests.
+- **Shell execution is best-effort, not a sandbox — stated honestly.** `run_command` uses a real shell, so a command like `cd .. && …` can technically reach outside `workspace/`. Mitigations: a denylist blocks obviously destructive commands (`rm -rf /`, fork bombs, `mkfs`, …), and shell can be turned off entirely with `AGENT_ALLOW_SHELL=false`. For untrusted input, disable shell or run the whole thing in a container.
+- **Web exposure is locked down by default.** CORS defaults to localhost only (`AGENT_CORS_ORIGINS`), and the server binds to `127.0.0.1`. Set `AGENT_REQUIRE_APPROVAL=true` to gate every write/run behind a manual `y/n` when running the CLI.
+- **No API keys, no cloud calls** — the model runs entirely on your machine.
 
 ---
 
@@ -121,9 +149,11 @@ Returns:
 
 ---
 
-## Fine-Tuning with LoRA & DPO
+## Fine-Tuning with LoRA & DPO (alternative track)
 
-The JSON action loop is a precision formatting task — ideal for LoRA fine-tuning. The model must emit exactly one JSON object per step with the right action key and required fields. Any deviation (markdown fences, prose prefix, wrong keys) breaks the agent loop.
+**In the shipped agent, JSON reliability is handled at inference by Ollama's `format="json"` constrained decoding — not by fine-tuning.** This section is a separate, self-contained experiment: *can a tiny model be taught the action format directly, so it emits clean JSON without constrained decoding?* It's here as a learning exercise and a portfolio piece, not a dependency of the running agent.
+
+The JSON action loop is a precision formatting task: exactly one JSON object per step, right action key, required fields present. Any deviation breaks the loop — which makes it a clean target for LoRA SFT + DPO.
 
 ### What's in `finetune/`
 
@@ -168,15 +198,17 @@ python -m finetune.train_dpo
 python -m finetune.eval --adapter both
 ```
 
-### Expected results (illustrative)
+### How it's evaluated
 
-| Model | JSON Parse Rate | Action Valid | Keys Complete |
-|-------|----------------|--------------|---------------|
-| Base TinyLlama | ~45% | ~38% | ~30% |
-| + SFT (LoRA r=16) | ~82% | ~79% | ~74% |
-| + DPO (SFT→DPO) | ~91% | ~88% | ~85% |
+`finetune/eval.py` runs the base model and the fine-tuned adapter on the same agent prompts and reports three rates:
 
-> **Why JSON parse rate is the key metric:** every step in the agent loop calls `json.loads()` on the model output. A failed parse = a broken step. The benchmark (`benchmark/run_benchmark.py`) measured the base tinyllama at ~40% JSON parse rate on action-format prompts. The fine-tuned adapter targets >85%.
+| Metric | Meaning |
+|--------|---------|
+| JSON parse rate | fraction of responses that are valid, parseable JSON |
+| Action validity | JSON is valid **and** the `action` key is a known action |
+| Key completeness | all required keys are present for the chosen action |
+
+> **No results are checked into this repo.** Training an adapter needs a GPU, and no adapter or eval run is committed here, so I'm not quoting parse-rate numbers I haven't produced — run `python -m finetune.eval --adapter both` to generate real before/after figures on your own hardware. JSON parse rate is the metric that matters because every agent step calls `json.loads()`, so a failed parse is a broken step. (For context, the local `benchmark/` run only exercises JSON formatting on a single task, so it isn't a parse-*rate* — it's one datapoint, not a benchmark of the format.)
 
 ### Running with the fine-tuned adapter in Ollama
 
